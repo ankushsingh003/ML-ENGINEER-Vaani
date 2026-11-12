@@ -120,3 +120,4 @@ def get_store_for_setting(setting_name: str) -> DocumentStore:
     if key not in _stores:
         _stores[key] = DocumentStore(chunk_size=cfg["chunk_size"], chunk_overlap=cfg["chunk_overlap"])
     return _stores[key]
+
