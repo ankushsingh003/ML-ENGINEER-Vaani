@@ -1,0 +1,146 @@
+[
+  {
+    "id": "q1",
+    "paper": "1706.03762v7",
+    "question": "What value of label smoothing was used during training in Attention Is All You Need, and what effect did it have on perplexity and BLEU?",
+    "expected_answer": "Label smoothing of value \u03f5_ls = 0.1 was used. It hurt perplexity as the model learns to be more unsure, but improved accuracy and BLEU score.",
+    "expected_citation": "1706.03762v7, Section 5.4",
+    "can_answer": true,
+    "trap": null
+  },
+  {
+    "id": "q2",
+    "paper": "1706.03762v7",
+    "question": "In the Transformer base model, what were the dimensions d_model, d_ff, and the number of heads h?",
+    "expected_answer": "d_model = 512, d_ff = 2048, and h = 8 heads (with d_k = d_v = 64).",
+    "expected_citation": "1706.03762v7, Table 3 / Section 3.2.2 & 3.3",
+    "can_answer": true,
+    "trap": null
+  },
+  {
+    "id": "q3",
+    "paper": "1706.03762v7",
+    "question": "According to Attention Is All You Need, what optimizer and warmup schedule was used for training, including the number of warmup steps?",
+    "expected_answer": "Adam optimizer with \u03b21 = 0.9, \u03b22 = 0.98, and \u03b5 = 10^-9. Learning rate varied inversely with square root of step number, with warmup_steps = 4000.",
+    "expected_citation": "1706.03762v7, Section 5.3",
+    "can_answer": true,
+    "trap": null
+  },
+  {
+    "id": "q4",
+    "paper": "2410.00037v1",
+    "question": "What is Mimi in the Moshi architecture, what is its framerate, and what bitrate does it operate at?",
+    "expected_answer": "Mimi is a neural audio codec operating at 12.5 Hz framerate and 1.1 kbps bitrate (with 8 codebooks for 24kHz audio).",
+    "expected_citation": "2410.00037v1, Abstract / Section 2.1 & 3",
+    "can_answer": true,
+    "trap": "Moshi vs Mimi naming confusion"
+  },
+  {
+    "id": "q5",
+    "paper": "2410.00037v1",
+    "question": "How many codebooks does Mimi use for audio tokens and how does Moshi model the inner/outer stream alignment?",
+    "expected_answer": "Mimi uses 8 codebooks (Residual Vector Quantization). Moshi models dialogue with dual streams (user and agent audio/text tokens) using multi-stream causal Transformer modeling with time offsets (inner/outer monologue).",
+    "expected_citation": "2410.00037v1, Section 3.1 & 3.2",
+    "can_answer": true,
+    "trap": null
+  },
+  {
+    "id": "q6",
+    "paper": "2410.00037v1",
+    "question": "What theoretical latency and overall end-to-end latency does Moshi achieve during spoken interaction?",
+    "expected_answer": "Theoretical latency of 160ms (80ms frame size + 80ms lookahead in Mimi) and overall practical latency around 200ms.",
+    "expected_citation": "2410.00037v1, Abstract / Section 1 & 3",
+    "can_answer": true,
+    "trap": null
+  },
+  {
+    "id": "q7",
+    "paper": "2507.07955v2",
+    "question": "What is the core premise of Dynamic Chunking in H-Net compared to static fixed-size chunking?",
+    "expected_answer": "Dynamic Chunking learns variable-length boundary decisions dynamically based on sequence semantics/content rather than imposing arbitrary fixed-length boundaries, reducing information loss across chunk transitions.",
+    "expected_citation": "2507.07955v2, Abstract / Section 1 & 3",
+    "can_answer": true,
+    "trap": "Chunking collision with audio streaming chunks or RAG chunks"
+  },
+  {
+    "id": "q8",
+    "paper": "2507.07955v2",
+    "question": "How does Dynamic Chunking in H-Net maintain differentiability during training when deciding chunk boundaries?",
+    "expected_answer": "It uses a soft boundary decision mechanism (such as continuous relaxation / Gumbel-Softmax or straight-through estimators) allowing gradient flow back to the router/chunking policy.",
+    "expected_citation": "2507.07955v2, Section 3",
+    "can_answer": true,
+    "trap": null
+  },
+  {
+    "id": "q9",
+    "paper": "2507.07955v2",
+    "question": "On what standard benchmarks does H-Net evaluate its hierarchical sequence modeling efficiency and perplexity?",
+    "expected_answer": "Evaluated on long-context language modeling and standard sequence benchmarks (e.g. PG19, Proof-Pile, or WikiText-103) measuring perplexity versus compute/FLOPs.",
+    "expected_citation": "2507.07955v2, Section 4 & 5",
+    "can_answer": true,
+    "trap": null
+  },
+  {
+    "id": "q10",
+    "paper": "cross-paper",
+    "question": "Compare how 'chunking' is defined in Moshi versus Dynamic Chunking for Sequence Modeling.",
+    "expected_answer": "In Moshi, chunking refers to temporal acoustic frames (e.g., 80ms audio frames) processed causally for real-time speech streaming, whereas in H-Net, chunking refers to dynamic segmentation of text/hierarchical token sequences to reduce self-attention quadratic complexity.",
+    "expected_citation": "2410.00037v1 Section 3 vs 2507.07955v2 Section 1",
+    "can_answer": true,
+    "trap": "Vocabulary collision across papers"
+  },
+  {
+    "id": "q11",
+    "paper": "1706.03762v7",
+    "question": "What was the exact dollar cost of the electricity consumed to train the Big Transformer model in Attention Is All You Need?",
+    "expected_answer": "The papers do not say. The paper reports training time (3.5 days on 8 P100 GPUs) and FLOPs, but does not provide financial or electricity costs.",
+    "expected_citation": "None (unanswerable)",
+    "can_answer": false,
+    "trap": "Unanswerable / Refusal"
+  },
+  {
+    "id": "q12",
+    "paper": "2410.00037v1",
+    "question": "What is the measured battery consumption in milliampere-hours (mAh) when running Moshi on an iPhone 16 Pro?",
+    "expected_answer": "The papers do not say. Moshi focuses on server/desktop inference and model architecture, and does not report iPhone battery measurements.",
+    "expected_citation": "None (unanswerable)",
+    "can_answer": false,
+    "trap": "Unanswerable / Refusal"
+  },
+  {
+    "id": "q13",
+    "paper": "2507.07955v2",
+    "question": "Does Dynamic Chunking include experimental results on quantum computing qubits or photonic hardware?",
+    "expected_answer": "The papers do not say. The paper evaluates on standard GPU digital hardware and sequence modeling benchmarks, not quantum or photonic hardware.",
+    "expected_citation": "None (unanswerable)",
+    "can_answer": false,
+    "trap": "Unanswerable / Refusal"
+  },
+  {
+    "id": "q14",
+    "paper": "2410.00037v1",
+    "question": "What is the size and parameter count of the Helium language model used inside Moshi?",
+    "expected_answer": "Helium is a 7B parameter language model (7 billion parameters) trained on text, adapted to multi-stream audio-text modeling in Moshi.",
+    "expected_citation": "2410.00037v1, Section 2 & 4.1",
+    "can_answer": true,
+    "trap": "Moshi vs Helium vs Mimi sub-component distinction"
+  },
+  {
+    "id": "q15",
+    "paper": "cross-paper",
+    "question": "Which of the three papers was trained on TPU v5e clusters?",
+    "expected_answer": "The papers do not say. Attention used 8 NVIDIA P100 GPUs; Moshi used NVIDIA H100s; Dynamic Chunking used standard NVIDIA GPUs. None of the papers mention TPU v5e.",
+    "expected_citation": "None (unanswerable)",
+    "can_answer": false,
+    "trap": "Hardware distractor / Refusal"
+  },
+  {
+    "id": "q16",
+    "paper": "1706.03762v7",
+    "question": "In Table 1 of Attention Is All You Need, what is the maximum path length for self-attention layers compared to recurrent layers?",
+    "expected_answer": "Self-attention has a maximum path length of O(1), whereas recurrent layers have a maximum path length of O(n).",
+    "expected_citation": "1706.03762v7, Table 1",
+    "can_answer": true,
+    "trap": "Table / LaTeX extraction trap"
+  }
+]

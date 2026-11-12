@@ -28,3 +28,8 @@ Thumbs.db
 # IDEs
 .vscode/
 .idea/
+
+# Large binary PDF files (downloaded dynamically via scripts/fetch_papers.py)
+data/papers/*.pdf
+
+
