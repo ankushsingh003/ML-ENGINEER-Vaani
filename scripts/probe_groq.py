@@ -202,3 +202,4 @@ if __name__ == "__main__":
     parser.add_argument("--rate", type=int, default=15, help="Requests per minute rate")
     args = parser.parse_args()
     asyncio.run(run_probe(n=args.n, rate_per_min=args.rate))
+
