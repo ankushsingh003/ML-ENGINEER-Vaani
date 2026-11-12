@@ -66,3 +66,4 @@ def log_result(
                 "retrieval_setting": retrieval_setting,
                 "answer_grade": answer_grade
             })
+
