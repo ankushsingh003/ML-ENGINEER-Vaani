@@ -151,3 +151,4 @@ class LLMClient:
             metrics["total_ms"] = (time.perf_counter() - t_start) * 1000.0
 
         return _generator(), metrics
+

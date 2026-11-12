@@ -86,3 +86,4 @@ class AdmissionController:
 
 # Global admission controller instance
 admission_controller = AdmissionController()
+
