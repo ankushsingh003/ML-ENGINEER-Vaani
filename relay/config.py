@@ -4,29 +4,23 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Groq Configuration
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 GROQ_MODEL = "llama-3.1-8b-instant"
 
-# Stand-in Server Configuration
 STANDIN_HOST = "127.0.0.1"
 STANDIN_PORT = 8000
 STANDIN_BASE_URL = f"http://{STANDIN_HOST}:{STANDIN_PORT}/v1"
 
-# Provider Limits (Calibrated via probe and official docs)
-# Groq free tier baseline for llama-3.1-8b-instant:
-RPM_LIMIT = 30           # Requests Per Minute
-TPM_LIMIT = 6000         # Tokens Per Minute
-RPD_LIMIT = 14400        # Requests Per Day
-TPD_LIMIT = 500000       # Tokens Per Day
-MAX_CONCURRENCY = 5      # Max concurrent active connections
+RPM_LIMIT = 30
+TPM_LIMIT = 6000
+RPD_LIMIT = 14400
+TPD_LIMIT = 500000
+MAX_CONCURRENCY = 5
 
-# Queue and Admission Limits
-MAX_QUEUE_SIZE = 25      # Bounded queue before load shedding (503)
-REQUEST_TIMEOUT_SEC = 12.0  # Max waiting + execution deadline before dropping
+MAX_QUEUE_SIZE = 25
+REQUEST_TIMEOUT_SEC = 12.0
 
-# Retrieval Settings for comparison (Table 3)
 RETRIEVAL_SETTINGS = {
     "setting_1": {
         "name": "Setting 1 (Compact)",
@@ -54,4 +48,3 @@ RETRIEVAL_SETTINGS = {
     }
 }
 DEFAULT_RETRIEVAL_SETTING = "setting_2"
-
