@@ -1,130 +1,257 @@
-"""Token-aware rate limiter, concurrency controller, and degradation ladder."""
-import time
+"""
+relay/limiter.py
+----------------
+Token-aware async rate limiter.
+
+Design decisions:
+- Uses threading.Lock (not asyncio.Lock) for data mutations so the
+  module-level _State object is safe across multiple asyncio.run() calls.
+- Waiting is done with asyncio.sleep() so the event loop stays unblocked.
+- acquire_concurrency uses a simple asyncio.Semaphore created lazily per
+  event loop via get_event_loop() context.
+"""
+
 import asyncio
+import time
 import threading
-from typing import Tuple, Dict, Any
+import logging
+from collections import deque
+from typing import Literal, Tuple
+
 import tiktoken
 
-from relay.config import RPM_LIMIT, TPM_LIMIT, RPD_LIMIT, TPD_LIMIT, MAX_CONCURRENCY
+from relay.config import (
+    RPM_LIMIT, TPM_LIMIT, RPD_LIMIT, TPD_LIMIT, MAX_CONCURRENCY
+)
+
+log = logging.getLogger(__name__)
 
 try:
     _enc = tiktoken.get_encoding("cl100k_base")
     def count_tokens(text: str) -> int:
-        return len(_enc.encode(text))
+        return max(1, len(_enc.encode(text)))
 except Exception:
-    def count_tokens(text: str) -> int:
+    def count_tokens(text: str) -> int:          # noqa: F811
         return max(1, len(text) // 4)
 
-class RateLimiter:
-    def __init__(
-        self,
-        rpm_limit: int = RPM_LIMIT,
-        tpm_limit: int = TPM_LIMIT,
-        rpd_limit: int = RPD_LIMIT,
-        tpd_limit: int = TPD_LIMIT,
-        max_concurrency: int = MAX_CONCURRENCY
-    ):
-        self.rpm_limit = rpm_limit
-        self.tpm_limit = tpm_limit
-        self.rpd_limit = rpd_limit
-        self.tpd_limit = tpd_limit
-        self.max_concurrency = max_concurrency
 
-        self._lock = threading.Lock()
-        
-        # Sliding windows (timestamps)
-        self.req_window = []  # list of float timestamps
-        self.tok_window = []  # list of (timestamp, token_count)
-        
+# ---------------------------------------------------------------------------
+# Internal state
+# ---------------------------------------------------------------------------
+
+class _State:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()           # plain threading lock — safe across loops
+
+        # Sliding-window deques: (monotonic_s, value)
+        self._req_win: deque = deque()
+        self._tok_win: deque = deque()
+
         # Daily counters
-        self.daily_requests = 0
-        self.daily_tokens = 0
-        
-        # Active in-flight concurrency
-        self.in_flight = 0
+        self._day_requests: int = 0
+        self._day_tokens:   int = 0
+        self._day_date:     str = ""
 
-    def get_status(self) -> Dict[str, Any]:
-        """Returns snapshot of current capacity and utilization."""
-        now = time.time()
+        # 429 cooldown (monotonic seconds)
+        self._cooldown_until: float = 0.0
+
+        # Concurrency counter (semaphore-like, guarded by _lock)
+        self._inflight: int = 0
+
+    # ------------------------------------------------------------------
+    # Sliding-window helpers — call under self._lock
+    # ------------------------------------------------------------------
+
+    def _prune(self) -> None:
+        cutoff = time.monotonic() - 60.0
+        while self._req_win and self._req_win[0][0] < cutoff:
+            self._req_win.popleft()
+        while self._tok_win and self._tok_win[0][0] < cutoff:
+            self._tok_win.popleft()
+
+    def _curr_rpm(self) -> int:
+        return len(self._req_win)
+
+    def _curr_tpm(self) -> int:
+        return sum(t for _, t in self._tok_win)
+
+    def _seconds_until_rpm_slot(self) -> float:
+        if len(self._req_win) < RPM_LIMIT:
+            return 0.0
+        return max(0.0, self._req_win[0][0] + 60.0 - time.monotonic())
+
+    def _seconds_until_tpm_slot(self, tokens: int) -> float:
+        if self._curr_tpm() + tokens <= TPM_LIMIT:
+            return 0.0
+        return max(0.0, self._tok_win[0][0] + 60.0 - time.monotonic())
+
+    def _reset_daily_if_needed(self) -> None:
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        if today != self._day_date:
+            self._day_date = today
+            self._day_requests = 0
+            self._day_tokens = 0
+
+    def _daily_exhausted(self, tokens: int) -> bool:
+        return (self._day_requests >= RPD_LIMIT or
+                self._day_tokens + tokens > TPD_LIMIT)
+
+    def _reserve(self, tokens: int) -> None:
+        now = time.monotonic()
+        self._req_win.append((now, 1))
+        self._tok_win.append((now, tokens))
+        self._day_requests += 1
+        self._day_tokens += tokens
+
+    def adjust_actual_tokens(self, estimated: int,
+                             actual_in: int, actual_out: int) -> None:
+        diff = (actual_in + actual_out) - estimated
+        if diff == 0 or not self._tok_win:
+            return
         with self._lock:
-            self._prune_windows(now)
-            curr_rpm = len(self.req_window)
-            curr_tpm = sum(t for _, t in self.tok_window)
+            t, tok = self._tok_win[-1]
+            self._tok_win[-1] = (t, max(0, tok + diff))
+            self._day_tokens = max(0, self._day_tokens + diff)
+
+    def snapshot(self) -> dict:
+        with self._lock:
             return {
-                "curr_rpm": curr_rpm,
-                "rpm_limit": self.rpm_limit,
-                "curr_tpm": curr_tpm,
-                "tpm_limit": self.tpm_limit,
-                "daily_requests": self.daily_requests,
-                "rpd_limit": self.rpd_limit,
-                "daily_tokens": self.daily_tokens,
-                "tpd_limit": self.tpd_limit,
-                "in_flight": self.in_flight,
-                "max_concurrency": self.max_concurrency
+                "curr_rpm":     self._curr_rpm(),
+                "rpm_limit":    RPM_LIMIT,
+                "curr_tpm":     self._curr_tpm(),
+                "tpm_limit":    TPM_LIMIT,
+                "day_requests": self._day_requests,
+                "rpd_limit":    RPD_LIMIT,
+                "day_tokens":   self._day_tokens,
+                "tpd_limit":    TPD_LIMIT,
+                "inflight":     self._inflight,
+                "max_inflight": MAX_CONCURRENCY,
+                "cooldown_s":   max(0.0, self._cooldown_until - time.monotonic()),
             }
 
-    def _prune_windows(self, now: float):
-        cutoff = now - 60.0
-        self.req_window = [t for t in self.req_window if t > cutoff]
-        self.tok_window = [(t, tok) for t, tok in self.tok_window if t > cutoff]
+    # ------------------------------------------------------------------
+    # Concurrency gate (threading-based, so asyncio.sleep() can wait)
+    # ------------------------------------------------------------------
 
-    def acquire(self, estimated_tokens: int = 500) -> Tuple[bool, str, float]:
-        """
-        Check if request can proceed.
-        Returns: (allowed: bool, degradation_mode: str, wait_seconds: float)
-        degradation_mode in ['NORMAL', 'THROTTLED', 'DAILY_EXHAUSTED', 'RATE_LIMITED']
-        """
-        now = time.time()
+    def try_acquire_concurrency(self) -> bool:
         with self._lock:
-            self._prune_windows(now)
-            
-            # 1. Daily Budget Check
-            if self.daily_requests >= self.rpd_limit or (self.daily_tokens + estimated_tokens) >= self.tpd_limit:
-                return False, "DAILY_EXHAUSTED", 0.0
+            if self._inflight >= MAX_CONCURRENCY:
+                return False
+            self._inflight += 1
+            return True
 
-            # 2. Concurrency Check
-            if self.in_flight >= self.max_concurrency:
-                return False, "RATE_LIMITED", 0.5
-
-            curr_rpm = len(self.req_window)
-            curr_tpm = sum(t for _, t in self.tok_window)
-
-            # 3. Minute Limit Check
-            if curr_rpm >= self.rpm_limit or (curr_tpm + estimated_tokens) > self.tpm_limit:
-                # Calculate time until earliest slot opens
-                oldest_req = self.req_window[0] if self.req_window else now
-                oldest_tok = self.tok_window[0][0] if self.tok_window else now
-                wait_time = max(0.1, 60.0 - (now - min(oldest_req, oldest_tok)))
-                return False, "RATE_LIMITED", wait_time
-
-            # 4. Check for Throttle threshold (>75% capacity)
-            mode = "NORMAL"
-            if curr_rpm > (0.75 * self.rpm_limit) or (curr_tpm + estimated_tokens) > (0.75 * self.tpm_limit):
-                mode = "THROTTLED"
-
-            # Reserve slot
-            self.in_flight += 1
-            self.req_window.append(now)
-            self.tok_window.append((now, estimated_tokens))
-            self.daily_requests += 1
-            self.daily_tokens += estimated_tokens
-
-            return True, mode, 0.0
-
-    def release(self, estimated_tokens: int, actual_tokens_in: int, actual_tokens_out: int):
-        """Release concurrency slot and adjust actual tokens consumed."""
+    def release_concurrency(self) -> None:
         with self._lock:
-            self.in_flight = max(0, self.in_flight - 1)
-            actual_total = actual_tokens_in + actual_tokens_out
-            diff = actual_total - estimated_tokens
-            if diff != 0:
-                self.daily_tokens += diff
-                now = time.time()
-                # adjust recent entry
-                if self.tok_window:
-                    last_t, last_tok = self.tok_window[-1]
-                    self.tok_window[-1] = (last_t, max(0, last_tok + diff))
+            self._inflight = max(0, self._inflight - 1)
 
-# Global limiter instance
-limiter = RateLimiter()
 
+_state = _State()
+
+
+# ---------------------------------------------------------------------------
+# Public async API
+# ---------------------------------------------------------------------------
+
+async def acquire(
+    estimated_tokens: int,
+    deadline: float,          # absolute monotonic time
+) -> Tuple[bool, str]:
+    """
+    Waits (via asyncio.sleep) until capacity is available or deadline expires.
+
+    Returns:
+        (True,  "NORMAL"|"THROTTLED")   – slot reserved; call release_tokens()
+        (False, "DAILY_EXHAUSTED")      – unrecoverable today
+        (False, "RATE_LIMITED")         – deadline passed before slot opened
+    """
+    # Quick daily check (non-blocking)
+    with _state._lock:
+        _state._reset_daily_if_needed()
+        if _state._daily_exhausted(estimated_tokens):
+            return False, "DAILY_EXHAUSTED"
+
+    while True:
+        now = time.monotonic()
+        if now >= deadline:
+            return False, "RATE_LIMITED"
+
+        # Respect 429 global cooldown
+        cooldown_left = _state._cooldown_until - now
+        if cooldown_left > 0:
+            sleep_s = min(cooldown_left, deadline - now)
+            if sleep_s > 0:
+                await asyncio.sleep(sleep_s)
+            continue
+
+        with _state._lock:
+            _state._prune()
+
+            if _state._daily_exhausted(estimated_tokens):
+                return False, "DAILY_EXHAUSTED"
+
+            wait = max(
+                _state._seconds_until_rpm_slot(),
+                _state._seconds_until_tpm_slot(estimated_tokens),
+            )
+
+            if wait <= 0:
+                _state._reserve(estimated_tokens)
+                rpm_ratio = _state._curr_rpm() / RPM_LIMIT
+                tpm_ratio = _state._curr_tpm() / TPM_LIMIT
+                mode = "THROTTLED" if max(rpm_ratio, tpm_ratio) > 0.75 else "NORMAL"
+                return True, mode
+
+        sleep_s = min(wait + 0.05, deadline - time.monotonic())
+        if sleep_s <= 0:
+            return False, "RATE_LIMITED"
+        await asyncio.sleep(sleep_s)
+
+
+async def acquire_concurrency(deadline: float) -> bool:
+    """
+    Waits until a concurrency slot opens or deadline expires.
+    Uses polling + asyncio.sleep (no asyncio primitives stored globally).
+    """
+    while True:
+        if _state.try_acquire_concurrency():
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        await asyncio.sleep(min(0.05, remaining))
+
+
+def release_concurrency() -> None:
+    _state.release_concurrency()
+
+
+def release_tokens(estimated: int, actual_in: int, actual_out: int) -> None:
+    _state.adjust_actual_tokens(estimated, actual_in, actual_out)
+
+
+def set_cooldown(retry_after_seconds: float) -> None:
+    _state._cooldown_until = time.monotonic() + retry_after_seconds
+    log.warning("429 cooldown set for %.1fs", retry_after_seconds)
+
+
+def snapshot() -> dict:
+    return _state.snapshot()
+
+
+# ---------------------------------------------------------------------------
+# Test helpers
+# ---------------------------------------------------------------------------
+
+def force_daily_exhausted() -> None:
+    with _state._lock:
+        _state._day_requests = RPD_LIMIT
+
+
+def reset_for_test() -> None:
+    with _state._lock:
+        _state._req_win.clear()
+        _state._tok_win.clear()
+        _state._day_requests = 0
+        _state._day_tokens = 0
+        _state._cooldown_until = 0.0
+        _state._inflight = 0
