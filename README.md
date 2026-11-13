@@ -45,12 +45,12 @@ python -m standin.server
 
 ### 5. Run Benchmark Load Shapes
 ```bash
-python scripts/run_load.py --scenario all
+python -m scripts.run_load --scenario all
 ```
 
 ### 6. Compute Required Results Tables
 ```bash
-python scripts/analyze.py
+python -m scripts.analyze
 ```
 
 All analysis and write-up details are available in [WRITEUP.md](WRITEUP.md).
