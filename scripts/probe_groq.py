@@ -8,7 +8,6 @@ import argparse
 from pathlib import Path
 import httpx
 
-# Ensure relay is on sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from relay.config import GROQ_API_KEY, GROQ_BASE_URL, GROQ_MODEL, STANDIN_BASE_URL
@@ -55,7 +54,6 @@ async def send_single_probe(client: httpx.AsyncClient, req_id: int, prompt: str,
             resp_headers = dict(resp.headers)
             status_code = resp.status_code
 
-            # Record ratelimit headers
             rl_headers = {k: v for k, v in resp_headers.items() if "ratelimit" in k.lower() or k.lower() == "retry-after"}
             if rl_headers:
                 PROBE_HEADERS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -164,7 +162,6 @@ async def run_probe(n: int = 10, rate_per_min: int = 15, source: str = "real", t
             results.append(res)
             print(f"  Req {i+1}: status={res['status']}, TTFT={res['first_token_ms']:.1f}ms, Total={res['total_ms']:.1f}ms")
 
-            # Log to results.csv
             log_result(
                 request_id=res["req_id"],
                 scenario="probe_latency",
@@ -183,7 +180,6 @@ async def run_probe(n: int = 10, rate_per_min: int = 15, source: str = "real", t
             if i < n - 1:
                 await asyncio.sleep(delay_between)
 
-        # Trigger intentional 429 to capture ratelimit-reset and retry-after headers
         if trigger_429:
             print("\nTriggering intentional 429 burst to capture rate-limit headers...")
             burst_tasks = [
@@ -194,7 +190,6 @@ async def run_probe(n: int = 10, rate_per_min: int = 15, source: str = "real", t
             rl_hits = [r for r in burst_results if r["status"] == "rate_limited"]
             print(f"Captured {len(rl_hits)} rate-limited 429 responses in probe burst.")
 
-    # Compute quick stats
     ok_runs = [r for r in results if r["status"] == "ok"]
     if ok_runs:
         ttfts = sorted(r["first_token_ms"] for r in ok_runs)
@@ -217,4 +212,3 @@ if __name__ == "__main__":
     parser.add_argument("--trigger-429", action="store_true", default=True)
     args = parser.parse_args()
     asyncio.run(run_probe(n=args.n, rate_per_min=args.rate, source=args.source, trigger_429=args.trigger_429))
-
