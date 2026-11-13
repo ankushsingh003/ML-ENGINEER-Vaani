@@ -1,11 +1,8 @@
 """
 relay/llm_client.py
 -------------------
-LLM Client for Real Groq and Stand-in Model Service with:
-- Streaming token consumption.
-- TTFT and monotonic latency instrumentation.
-- Provider retry handling strictly routed through limiter & concurrency controls.
-- Automatic 429 global cooldown propagation.
+LLM Client for Real Groq and Stand-in Model Service with streaming, TTFT tracking,
+and limiter-governed retries.
 """
 
 import time
@@ -31,7 +28,7 @@ log = logging.getLogger(__name__)
 
 class LLMClient:
     def __init__(self, source: str = "stand-in", max_retries: int = 2, base_url: Optional[str] = None):
-        self.source = source  # "real" or "stand-in"
+        self.source = source
         self.max_retries = max_retries
         if base_url:
             self.base_url = base_url
@@ -49,10 +46,6 @@ class LLMClient:
         max_tokens: int = 512,
         deadline: Optional[float] = None
     ) -> Tuple[AsyncGenerator[str, None], Dict[str, Any]]:
-        """
-        Sends chat completion request with streaming.
-        Returns (token_stream_generator, metrics_dict).
-        """
         url = f"{self.base_url}/chat/completions"
         headers = {"Content-Type": "application/json"}
         if self.source == "real":
@@ -66,7 +59,6 @@ class LLMClient:
             "stream": True
         }
 
-        # Estimate input tokens
         input_text = " ".join(m["content"] for m in messages)
         est_tokens_in = count_tokens(input_text)
 
@@ -88,7 +80,6 @@ class LLMClient:
             effective_deadline = deadline or (time.monotonic() + 12.0)
 
             while retries <= self.max_retries:
-                # 1. Acquire concurrency slot
                 concurrency_acquired = await acquire_concurrency(effective_deadline)
                 if not concurrency_acquired:
                     metrics["status"] = "timeout"
@@ -105,7 +96,6 @@ class LLMClient:
                         async with client.stream("POST", url, json=payload, headers=headers) as response:
                             metrics["headers"] = dict(response.headers)
 
-                            # Handle 429 Rate Limit
                             if response.status_code == 429:
                                 metrics["status"] = "rate_limited"
                                 retry_after = float(response.headers.get("retry-after", 2.0))
@@ -118,12 +108,10 @@ class LLMClient:
                                     yield f"[Rate limited: 429. Retry after {retry_after}s]"
                                     return
 
-                                # Jittered backoff
                                 sleep_time = min(retry_after + random.uniform(0.1, 0.4), effective_deadline - time.monotonic())
                                 if sleep_time > 0:
                                     await asyncio.sleep(sleep_time)
 
-                                # Re-acquire token allowance from limiter for the retry
                                 ok, mode = await acquire(estimated_tokens=est_tokens_in, deadline=effective_deadline)
                                 if not ok:
                                     metrics["status"] = "rate_limited"
@@ -131,7 +119,6 @@ class LLMClient:
                                     return
                                 continue
 
-                            # Handle non-200 errors
                             if response.status_code != 200:
                                 body = await response.aread()
                                 metrics["status"] = "error"
@@ -149,7 +136,6 @@ class LLMClient:
                                     await asyncio.sleep(sleep_time)
                                 continue
 
-                            # Successful 200 Stream
                             metrics["status"] = "ok"
                             out_tokens = 0
 
