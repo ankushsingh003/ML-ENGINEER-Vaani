@@ -1,14 +1,7 @@
 """
 relay/pipeline.py
 -----------------
-The 5-Step Pipeline:
-1. Understand: Extracts key entities and builds an enriched query.
-2. Retrieve (Tool Call): BM25 retrieval over indexed paper chunks.
-3. Decide (Branch/Loop): Evaluates evidence quality; widens query and re-retrieves if needed.
-4. Draft: Streamed LLM call (or deterministic graceful synthesis on daily budget exhaustion).
-5. Verify (Code): Validates citations against actual retrieved passages.
-
-All latencies are measured with real monotonic timestamps via RequestTrace.
+The 5-Step Pipeline: Understand -> Retrieve -> Decide -> Draft -> Verify.
 """
 
 import re
@@ -29,9 +22,7 @@ class RelayPipeline:
         self.llm_client = LLMClient(source=source)
         self.store = get_store_for_setting(retrieval_setting)
 
-    # --- Step 1: Understand ---
     def step_understand(self, query: str) -> Dict[str, Any]:
-        """Normalize terminology traps, detect key entities, and inject disambiguation terms."""
         normalized = query.strip()
         entities = []
         enriched_terms = []
@@ -60,41 +51,29 @@ class RelayPipeline:
             "enriched_query": enriched_query
         }
 
-    # --- Step 2: Retrieve (Tool Call) ---
     def step_retrieve(self, query_info: Dict[str, Any], top_k: int = 5, rerank: bool = True) -> List[Dict[str, Any]]:
-        """Tool call executing BM25 retrieval using entity-enriched query."""
         query = query_info["enriched_query"]
         return self.store.retrieve(query, top_k=top_k, rerank=rerank)
 
-    # --- Step 3: Decide (Branch / Loop) ---
     def step_decide(
         self,
         query_info: Dict[str, Any],
         chunks: List[Dict[str, Any]]
     ) -> Tuple[str, List[Dict[str, Any]], bool]:
-        """
-        Decision engine: checks if retrieved context has sufficient evidence.
-        Branch / Loop: if top chunk score is low or entity coverage is weak,
-        widens query with expanded keywords and re-retrieves once.
-        """
         loop_fired = False
         top_score = chunks[0].get("final_score", chunks[0].get("bm25_score", 0.0)) if chunks else 0.0
 
-        # Loop condition: low initial confidence or fewer than 2 chunks
         if len(chunks) < 2 or top_score < 3.0:
             loop_fired = True
-            # Widen query by combining original query with paper-level contextual keywords
             widened = query_info["normalized_query"] + " model architecture method experimental evaluation results"
             chunks = self.store.retrieve(widened, top_k=5, rerank=True)
 
-        # Re-evaluate after widening
         best_score = chunks[0].get("final_score", chunks[0].get("bm25_score", 0.0)) if chunks else 0.0
         if not chunks or best_score < 1.0:
             return "REFUSE", chunks, loop_fired
 
         return "PROCEED", chunks, loop_fired
 
-    # --- Step 4: Draft (LLM Generation or Graceful Degradation) ---
     async def step_draft(
         self,
         query: str,
@@ -103,10 +82,8 @@ class RelayPipeline:
         trace: RequestTrace,
         deadline_monotonic: float
     ) -> Tuple[str, Dict[str, Any]]:
-        """Drafts cited response or activates graceful degradation on daily budget exhaustion."""
         t_draft_start = time.perf_counter()
 
-        # Case 1: Decided honest refusal
         if decision == "REFUSE":
             refusal_text = "The papers do not say. The requested information is not present in the indexed arXiv papers."
             elapsed_ms = (time.perf_counter() - t_draft_start) * 1000.0
@@ -120,7 +97,6 @@ class RelayPipeline:
                 "answer_grade": "refused_correctly"
             }
 
-        # Build context
         context_blocks = []
         for i, c in enumerate(chunks):
             context_blocks.append(
@@ -143,10 +119,8 @@ class RelayPipeline:
 
         est_tokens = count_tokens(system_prompt + user_prompt)
 
-        # Acquire rate limiter slot (awaits capacity until deadline)
         allowed, degradation_mode = await acquire(estimated_tokens=est_tokens, deadline=deadline_monotonic)
 
-        # Case 2: Daily Budget Exhausted -> Graceful degraded response (Heading 7)
         if degradation_mode == "DAILY_EXHAUSTED":
             excerpts = "\n- ".join([f"{c['paper_title']} (Page {c['page_num']}): {c['text'][:140]}..." for c in chunks[:2]])
             reply = (
@@ -176,7 +150,6 @@ class RelayPipeline:
                 "answer_grade": "wrong"
             }
 
-        # If THROTTLED mode, reduce max output tokens to preserve TPM
         max_tokens = 256 if degradation_mode == "THROTTLED" else 512
 
         try:
@@ -211,12 +184,7 @@ class RelayPipeline:
                 "answer_grade": "wrong"
             }
 
-    # --- Step 5: Verify (Deterministic Code) ---
     def step_verify(self, answer_text: str, chunks: List[Dict[str, Any]]) -> str:
-        """
-        Deterministic verification: Ensures cited paper IDs exist in retrieved chunks.
-        If paper IDs in citation are fabricated or missing, flags or adjusts response.
-        """
         if "the papers do not say" in answer_text.lower():
             return answer_text
 
@@ -230,20 +198,13 @@ class RelayPipeline:
         return answer_text
 
     async def execute(self, query: str, trace: RequestTrace, deadline_sec: float = 12.0) -> Dict[str, Any]:
-        """Executes full 5-step pipeline with real monotonic instrumentation."""
         deadline_monotonic = time.monotonic() + deadline_sec
 
-        # Step 1: Understand
         query_info = self.step_understand(query)
-
-        # Step 2: Retrieve (Tool Call)
         chunks = self.step_retrieve(query_info)
-
-        # Step 3: Decide (Branch / Loop)
         decision, chunks, loop_fired = self.step_decide(query_info, chunks)
         trace.mark_retrieval_done()
 
-        # Step 4: Draft
         drafted, metrics = await self.step_draft(
             query=query,
             chunks=chunks,
@@ -252,7 +213,6 @@ class RelayPipeline:
             deadline_monotonic=deadline_monotonic
         )
 
-        # Step 5: Verify
         verified_answer = self.step_verify(drafted, chunks)
 
         return {
