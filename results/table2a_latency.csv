@@ -1,0 +1,6 @@
+scenario,source,requests_sent,duration_s,offered_rate_per_min,ttft_p50_ms,ttft_p95_ms,ttft_p99_ms,total_p50_ms,total_p95_ms,total_p99_ms
+steady,stand-in,15,108.0,8,676.6,12012.8,12015.3,1387.6,12012.8,12015.3
+burst,stand-in,20,0.0,0,12030.6,12043.1,12043.6,12030.6,12043.1,12043.6
+sustained_overload,stand-in,25,19.0,79,12012.8,12024.2,12025.7,12012.8,12024.2,12025.7
+limit_halved,stand-in,15,170.0,5,12005.6,12010.7,12011.1,12005.6,12010.7,12011.1
+daily_budget_exhausted,stand-in,10,3.0,200,10.7,11.6,11.8,10.7,11.6,11.8
