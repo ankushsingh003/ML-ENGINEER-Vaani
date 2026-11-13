@@ -1,0 +1,4 @@
+setting,questions_asked,correct_pct,wrong_pct,refused_correctly_pct,tokens_per_answer,ttft_p50_ms,ttft_p95_ms,total_p50_ms,total_p95_ms
+setting_1,16,56.2,18.8,0.0,349,701.3,12002.2,1291.0,12002.2
+setting_2,16,43.8,43.8,0.0,577,823.2,12011.0,1453.8,12011.0
+setting_3,16,25.0,62.5,0.0,984,12002.9,12011.2,12002.9,12011.2
