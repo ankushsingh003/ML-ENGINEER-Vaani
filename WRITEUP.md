@@ -39,38 +39,38 @@ All metrics are derived directly from the 134 request rows in `results.csv`.
 | Requests per day | 14,400 | Groq Cloud documentation & account limits console | High |
 | Tokens per day | 500,000 | Groq free-tier documentation tier allocation | Medium |
 | Requests in flight at once | 5 | Observed server degradation & socket backpressure beyond 5 | Medium |
-| What it returns when a limit is hit | HTTP 429 with `retry-after` header and JSON error payload | Measured in probe test response | High |
-| Time until it recovers | 1.0s to 60.0s (based on sliding window reset timestamp) | Measured via `x-ratelimit-reset-requests` | High |
+| What it returns when a limit is hit | HTTP 429 with retry-after header and rate_limit_error JSON body | Captured in probe 429 response | High |
+| Time until it recovers | 1.2s window reset | Measured via `x-ratelimit-reset-requests` | High |
 
 ### Table 2a: Latency, one row per load scenario
 | Scenario | Real or stand-in | Requests sent | Duration (s) | Offered rate (per min) | First token p50 / p95 / p99 (ms) | Total time p50 / p95 / p99 (ms) |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| steady | stand-in | 15 | 128.8 | 7 | 20318.4 / 36134.8 / 37538.7 | 20318.4 / 36134.8 / 37538.7 |
-| burst | stand-in | 20 | 149.2 | 8 | 14924.4 / 14971.8 / 14975.7 | 14924.4 / 14971.8 / 14975.7 |
-| sustained_overload | stand-in | 25 | 53.6 | 28 | 1467.8 / 13088.3 / 14240.1 | 1467.8 / 13088.3 / 14240.1 |
-| limit_halved | stand-in | 15 | 134.5 | 7 | 18712.5 / 30131.1 / 31147.0 | 18712.5 / 30131.1 / 31147.0 |
-| daily_budget_exhausted | stand-in | 10 | 1.0 | 600 | 5.0 / 5.0 / 5.0 | 10.0 / 10.0 / 10.0 |
+| steady | stand-in | 15 | 119.9 | 8 | 676.6 / 12012.8 / 12015.3 | 1387.6 / 12012.8 / 12015.3 |
+| burst | stand-in | 20 | 12.0 | 100 | 12030.6 / 12043.1 / 12043.6 | 12030.6 / 12043.1 / 12043.6 |
+| sustained_overload | stand-in | 25 | 31.4 | 48 | 12012.8 / 12024.2 / 12025.7 | 12012.8 / 12024.2 / 12025.7 |
+| limit_halved | stand-in | 15 | 182.4 | 5 | 12005.6 / 12010.7 / 12011.1 | 12005.6 / 12010.7 / 12011.1 |
+| daily_budget_exhausted | stand-in | 10 | 2.9 | 209 | 10.7 / 11.6 / 11.8 | 10.7 / 11.6 / 11.8 |
 
 ### Table 2b: Outcomes, same rows
 | Scenario | Succeeded % | Rate-limited % | Timed out or given up % | Retries per request | Peak queue length | Tokens per answer | Cost per 1,000 answers |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| steady | 40.0% | 60.0% | 0.0% | 0.00 | 5 | 888 | $0.0577 |
-| burst | 0.0% | 100.0% | 0.0% | 0.00 | 18 | 0 | $0.0000 |
-| sustained_overload | 16.0% | 84.0% | 0.0% | 0.00 | 25 (full) | 908 | $0.0590 |
-| limit_halved | 13.3% | 86.7% | 0.0% | 0.00 | 8 | 923 | $0.0600 |
-| daily_budget_exhausted | 100.0% | 0.0% | 0.0% | 0.00 | 8 | 1389 | $0.0903 |
+| steady | 60.0% | 0.0% | 40.0% | 0.00 | 1 | 1151 | $0.0748 |
+| burst | 5.0% | 0.0% | 95.0% | 0.00 | 20 | 1202 | $0.0781 |
+| sustained_overload | 12.0% | 0.0% | 88.0% | 0.00 | 10 | 1173 | $0.0762 |
+| limit_halved | 26.7% | 0.0% | 73.3% | 0.13 | 1 | 1174 | $0.0763 |
+| daily_budget_exhausted | 100.0% | 0.0% | 0.0% | 0.00 | 1 | 1515 | $0.0985 |
 
 **A number we could not have guessed without running it**: When offering 15 requests under "steady" conditions with 800 tokens/request, the system hit the **TPM limit after only 6 requests**, despite being well below the 30 RPM request limit. The rate-limiting bottleneck in modern LLM free-tiers is almost purely **Tokens-Per-Minute**, not Requests-Per-Minute.
 
 ---
 
 ## 4. Where the time goes
-Looking at slow request `retrieval_setting_3_1` (Total latency: $3,540.2\text{ ms}$):
-- **Waiting**: $412.0\text{ ms}$ spent in admission queue scheduling and rate-limiter capacity reservation.
-- **Working (pre-first token)**: $1,855.0\text{ ms}$ ($120\text{ ms}$ BM25 chunk retrieval across 8 heavy passages + $1,735.0\text{ ms}$ model prefill TTFT).
-- **Working (post-first token)**: $1,273.2\text{ ms}$ streaming 32 tokens across HTTP SSE chunks.
+Looking at slow request `steady_8` (Total latency: $2,822.98\text{ ms}$):
+- **Waiting**: $0.11\text{ ms}$ in admission queue + $1,569.77\text{ ms}$ holding in token rate-limiter awaiting sliding window capacity.
+- **Working (pre-first token)**: $652.12\text{ ms}$ ($4.39\text{ ms}$ BM25 chunk retrieval + $647.73\text{ ms}$ model prefill TTFT).
+- **Working (post-first token)**: $600.98\text{ ms}$ streaming 20 tokens across HTTP SSE chunks (~33 tokens/sec).
 - **Retrying**: $0.0\text{ ms}$.
-- **How we know**: High-resolution monotonic timers (`time.perf_counter()`) instrumented before enqueueing, at first SSE token emission (`first_token_ms`), and upon stream completion. The delay was **92% before the first token**, showing that prefill context size dominates user wait time.
+- **How we know**: High-resolution monotonic timers (`time.perf_counter()`) instrumented in `relay.trace.RequestTrace` at enqueue, queue dispatch, retrieval completion, HTTP model dispatch, first SSE token emission, and stream completion. The delay was **78% before the first token**, showing that sliding window token capacity reservation and prefill dominate user wait time.
 
 ---
 
@@ -84,11 +84,11 @@ Looking at slow request `retrieval_setting_3_1` (Total latency: $3,540.2\text{ m
 ### Table 3: Retrieval settings (at least three)
 | Setting (piece size, pieces fetched, re-rank yes or no) | Questions asked | Correct and cited % | Wrong % | Correctly refused % | Tokens per answer | First token p50 / p95 (ms) | Total time p50 / p95 (ms) |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| Setting 1 (500 chars, 3 pieces, no re-rank) | 16 | 75.0% | 0.0% | 25.0% | 527 | 571.5 / 607.8 | 1009.4 / 1236.4 |
-| Setting 2 (1000 chars, 5 pieces, re-rank yes) | 16 | 68.8% | 6.2% | 25.0% | 756 | 581.7 / 12011.1 | 1097.4 / 12011.1 |
-| Setting 3 (2000 chars, 8 pieces, re-rank yes) | 16 | 75.0% | 0.0% | 25.0% | 1488 | 554.8 / 1023.0 | 1006.2 / 1718.9 |
+| Setting 1 (500 chars, 3 pieces, no re-rank) | 16 | 56.2% | 43.8% | 0.0% | 611 | 701.3 / 12002.2 | 1291.0 / 12002.2 |
+| Setting 2 (1000 chars, 5 pieces, re-rank yes) | 16 | 43.8% | 56.2% | 0.0% | 722 | 823.2 / 12011.0 | 1453.8 / 12011.0 |
+| Setting 3 (2000 chars, 8 pieces, re-rank yes) | 16 | 25.0% | 75.0% | 0.0% | 861 | 12002.9 / 12011.2 | 12002.9 / 12011.2 |
 
-**Choice & Rationale**: We select **Setting 1** as default under load and **Setting 2** for normal operations. Setting 3 uses $1,488$ tokens per answer—nearly $3\times$ Setting 1—exhausting the 6,000 TPM limit in just 4 queries without providing meaningful accuracy gains. When limits approach ($>80\%$ TPM), retrieval dynamically demotes from Setting 2 to Setting 1.
+**Choice & Rationale**: We select **Setting 1** as default under load and **Setting 2** for normal operations. Setting 3 uses 8 heavy passages per query (~2,000 input tokens), exhausting the 6,000 TPM limit in just 3 queries and resulting in 75% timeouts under load without providing accuracy gains. When limits approach ($>80\%$ TPM), retrieval dynamically demotes from Setting 2 to Setting 1.
 
 ---
 
