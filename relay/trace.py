@@ -119,6 +119,8 @@ class RequestTrace:
             "source":               self.source,
             "wall_enqueued":        self.wall_enqueued,
             "queue_len_at_enqueue": self.queue_len_at_enqueue,
+            "t_enqueued_ms":        _r(self.t_enqueued),
+            "t_completed_ms":       _r(self.t_completed),
         }
 
     def finish(self, *, tokens_in: int, tokens_out: int, retries: int,
@@ -229,3 +231,4 @@ def _diff(a: Optional[float], b: Optional[float]) -> float:
 
 def _r(v: float) -> float:
     return round(v, 2)
+
