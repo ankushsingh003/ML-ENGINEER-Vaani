@@ -11,7 +11,7 @@ import httpx
 # Ensure relay is on sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from relay.config import GROQ_API_KEY, GROQ_BASE_URL, GROQ_MODEL
+from relay.config import GROQ_API_KEY, GROQ_BASE_URL, GROQ_MODEL, STANDIN_BASE_URL
 from relay.results import log_result, init_results_csv
 
 PROBE_HEADERS_FILE = Path("results/probe_headers.jsonl")
@@ -27,10 +27,10 @@ SAMPLE_PROMPTS = [
     "How many codebooks are used by Mimi in Moshi?"
 ]
 
-async def send_single_probe(client: httpx.AsyncClient, req_id: int, prompt: str) -> dict:
-    url = f"{GROQ_BASE_URL}/chat/completions"
+async def send_single_probe(client: httpx.AsyncClient, req_id: int, prompt: str, base_url: str, api_key: str) -> dict:
+    url = f"{base_url}/chat/completions"
     headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Authorization": f"Bearer {api_key}" if api_key else "Bearer mock-key",
         "Content-Type": "application/json"
     }
     payload = {
@@ -142,13 +142,15 @@ async def send_single_probe(client: httpx.AsyncClient, req_id: int, prompt: str)
             "headers": {}
         }
 
-async def run_probe(n: int = 10, rate_per_min: int = 15):
-    if not GROQ_API_KEY:
-        print("ERROR: GROQ_API_KEY environment variable is not set!")
-        print("Please set GROQ_API_KEY before running the probe.")
-        return
+async def run_probe(n: int = 10, rate_per_min: int = 15, source: str = "real", trigger_429: bool = True):
+    if source == "real" and not GROQ_API_KEY:
+        print("Notice: GROQ_API_KEY environment variable is not set. Defaulting probe to stand-in server.")
+        source = "stand-in"
 
-    print(f"=== Starting Groq Probe (n={n}, rate={rate_per_min}/min) on model: {GROQ_MODEL} ===")
+    base_url = GROQ_BASE_URL if source == "real" else "http://127.0.0.1:8000"
+    api_key = GROQ_API_KEY if source == "real" else "mock-key"
+
+    print(f"=== Starting Probe (n={n}, rate={rate_per_min}/min, source={source}) on model: {GROQ_MODEL} ===")
     delay_between = 60.0 / rate_per_min
 
     results = []
@@ -158,15 +160,15 @@ async def run_probe(n: int = 10, rate_per_min: int = 15):
         for i in range(n):
             prompt = SAMPLE_PROMPTS[i % len(SAMPLE_PROMPTS)]
             print(f"Sending probe request {i+1}/{n}...")
-            res = await send_single_probe(client, i + 1, prompt)
+            res = await send_single_probe(client, i + 1, prompt, base_url=base_url, api_key=api_key)
             results.append(res)
             print(f"  Req {i+1}: status={res['status']}, TTFT={res['first_token_ms']:.1f}ms, Total={res['total_ms']:.1f}ms")
-            
+
             # Log to results.csv
             log_result(
                 request_id=res["req_id"],
                 scenario="probe_latency",
-                source="real",
+                source=source,
                 start_time=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 first_token_ms=res["first_token_ms"],
                 total_ms=res["total_ms"],
@@ -180,6 +182,17 @@ async def run_probe(n: int = 10, rate_per_min: int = 15):
 
             if i < n - 1:
                 await asyncio.sleep(delay_between)
+
+        # Trigger intentional 429 to capture ratelimit-reset and retry-after headers
+        if trigger_429:
+            print("\nTriggering intentional 429 burst to capture rate-limit headers...")
+            burst_tasks = [
+                send_single_probe(client, 100 + j, "Rapid fire limit test probe prompt", base_url=base_url, api_key=api_key)
+                for j in range(35)
+            ]
+            burst_results = await asyncio.gather(*burst_tasks)
+            rl_hits = [r for r in burst_results if r["status"] == "rate_limited"]
+            print(f"Captured {len(rl_hits)} rate-limited 429 responses in probe burst.")
 
     # Compute quick stats
     ok_runs = [r for r in results if r["status"] == "ok"]
@@ -200,6 +213,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--n", type=int, default=8, help="Number of probe requests")
     parser.add_argument("--rate", type=int, default=15, help="Requests per minute rate")
+    parser.add_argument("--source", default="real", choices=["real", "stand-in"])
+    parser.add_argument("--trigger-429", action="store_true", default=True)
     args = parser.parse_args()
-    asyncio.run(run_probe(n=args.n, rate_per_min=args.rate))
+    asyncio.run(run_probe(n=args.n, rate_per_min=args.rate, source=args.source, trigger_429=args.trigger_429))
 
