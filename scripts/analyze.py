@@ -99,7 +99,7 @@ def generate_table_1():
     ret_429 = status_429 or "HTTP 429 with `retry-after` header and JSON error payload"
     print(f"| What it returns when a limit is hit | {ret_429} | Captured in probe 429 response | High |")
     
-    res_display = f"{reset_val}s window reset" if reset_val else "1.0s to 60.0s sliding reset"
+    res_display = f"{reset_val} window reset" if reset_val else "1.0s to 60.0s sliding reset"
     print(f"| Time until it recovers | {res_display} | Measured via `x-ratelimit-reset-requests` | High |\n")
 
 def generate_tables_2a_and_2b(rows: List[Dict[str, Any]], traces: Dict[str, Dict[str, Any]]):
@@ -121,14 +121,25 @@ def generate_tables_2a_and_2b(rows: List[Dict[str, Any]], traces: Dict[str, Dict
         source = sc_rows[0]["source"]
         n_sent = len(sc_rows)
 
-        # Compute empirical duration from trace timestamps if available, else from row totals
+        # Compute empirical duration from trace monotonic timestamps or CSV timestamps
         sc_traces = [traces[r["request_id"]] for r in sc_rows if r["request_id"] in traces]
-        if len(sc_traces) >= 2 and "total_ms" in sc_traces[0]:
-            # Duration is time span of the test run
-            total_span_ms = max(r["total_ms"] for r in sc_rows)
-            dur_s = max(1.0, total_span_ms / 1000.0) if sc in ["burst", "daily_budget_exhausted"] else max(1.0, sum(r["total_ms"] for r in sc_rows) / 1000.0 / 2.0)
+        has_mono = (
+            len(sc_traces) >= 2
+            and all(t.get("t_enqueued_ms") is not None and t.get("t_completed_ms") is not None for t in sc_traces)
+        )
+        if has_mono:
+            min_start = min(t["t_enqueued_ms"] for t in sc_traces)
+            max_end = max(t["t_completed_ms"] for t in sc_traces)
+            dur_s = max(0.5, (max_end - min_start) / 1000.0)
         else:
-            dur_s = max(1.0, sum(r["total_ms"] for r in sc_rows) / 1000.0 / 2.0)
+            # Fallback: calculate from CSV start_time (ISO-8601) + total_ms
+            import datetime
+            try:
+                times = [datetime.datetime.fromisoformat(r["start_time"].replace("Z", "+00:00")) for r in sc_rows]
+                end_times = [times[i] + datetime.timedelta(milliseconds=sc_rows[i]["total_ms"]) for i in range(len(sc_rows))]
+                dur_s = max(0.5, (max(end_times) - min(times)).total_seconds())
+            except Exception:
+                dur_s = max(1.0, max(r["total_ms"] for r in sc_rows) / 1000.0)
 
         durations[sc] = dur_s
         offered_rate = round((n_sent / dur_s) * 60.0) if dur_s > 0 else 0
