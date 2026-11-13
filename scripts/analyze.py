@@ -2,10 +2,8 @@
 scripts/analyze.py
 ------------------
 Zero-hardcoding analysis script:
-Recomputes Table 1, Table 2a, Table 2b, and Table 3 strictly from:
-- results.csv
-- results/results_trace.jsonl
-- results/probe_headers.jsonl
+Recomputes Table 1, Table 2a, Table 2b, and Table 3 strictly from results.csv,
+results/results_trace.jsonl, and results/probe_headers.jsonl.
 """
 
 import csv
@@ -68,7 +66,6 @@ def generate_table_1():
     print("| Limit | Value you found | How you found it | Confidence (high, medium, low) |")
     print("| :--- | :--- | :--- | :--- |")
 
-    # Inspect probe headers if available
     rpm_val, tpm_val, reset_val, status_429 = None, None, None, None
     if PROBE_HEADERS.exists():
         with open(PROBE_HEADERS, "r", encoding="utf-8") as f:
@@ -121,7 +118,6 @@ def generate_tables_2a_and_2b(rows: List[Dict[str, Any]], traces: Dict[str, Dict
         source = sc_rows[0]["source"]
         n_sent = len(sc_rows)
 
-        # Compute empirical duration from trace monotonic timestamps or CSV timestamps
         sc_traces = [traces[r["request_id"]] for r in sc_rows if r["request_id"] in traces]
         has_mono = (
             len(sc_traces) >= 2
@@ -132,7 +128,6 @@ def generate_tables_2a_and_2b(rows: List[Dict[str, Any]], traces: Dict[str, Dict
             max_end = max(t["t_completed_ms"] for t in sc_traces)
             dur_s = max(0.5, (max_end - min_start) / 1000.0)
         else:
-            # Fallback: calculate from CSV start_time (ISO-8601) + total_ms
             import datetime
             try:
                 times = [datetime.datetime.fromisoformat(r["start_time"].replace("Z", "+00:00")) for r in sc_rows]
@@ -178,7 +173,6 @@ def generate_tables_2a_and_2b(rows: List[Dict[str, Any]], traces: Dict[str, Dict
         total_tokens = sum(r["tokens_in"] + r["tokens_out"] for r in sc_rows if r["status"] == "ok")
         tokens_per_ans = round(total_tokens / max(1, succeeded))
 
-        # Peak queue length computed from actual trace queue_len_at_enqueue
         sc_traces = [traces[r["request_id"]] for r in sc_rows if r["request_id"] in traces]
         if sc_traces:
             peak_q = max(t.get("queue_len_at_enqueue", 0) for t in sc_traces) + 1
