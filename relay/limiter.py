@@ -2,13 +2,6 @@
 relay/limiter.py
 ----------------
 Token-aware async rate limiter.
-
-Design decisions:
-- Uses threading.Lock (not asyncio.Lock) for data mutations so the
-  module-level _State object is safe across multiple asyncio.run() calls.
-- Waiting is done with asyncio.sleep() so the event loop stays unblocked.
-- acquire_concurrency uses a simple asyncio.Semaphore created lazily per
-  event loop via get_event_loop() context.
 """
 
 import asyncio
@@ -31,36 +24,19 @@ try:
     def count_tokens(text: str) -> int:
         return max(1, len(_enc.encode(text)))
 except Exception:
-    def count_tokens(text: str) -> int:          # noqa: F811
+    def count_tokens(text: str) -> int:
         return max(1, len(text) // 4)
-
-
-# ---------------------------------------------------------------------------
-# Internal state
-# ---------------------------------------------------------------------------
 
 class _State:
     def __init__(self) -> None:
-        self._lock = threading.Lock()           # plain threading lock — safe across loops
-
-        # Sliding-window deques: (monotonic_s, value)
+        self._lock = threading.Lock()
         self._req_win: deque = deque()
         self._tok_win: deque = deque()
-
-        # Daily counters
         self._day_requests: int = 0
-        self._day_tokens:   int = 0
-        self._day_date:     str = ""
-
-        # 429 cooldown (monotonic seconds)
+        self._day_tokens: int = 0
+        self._day_date: str = ""
         self._cooldown_until: float = 0.0
-
-        # Concurrency counter (semaphore-like, guarded by _lock)
         self._inflight: int = 0
-
-    # ------------------------------------------------------------------
-    # Sliding-window helpers — call under self._lock
-    # ------------------------------------------------------------------
 
     def _prune(self) -> None:
         cutoff = time.monotonic() - 60.0
@@ -129,10 +105,6 @@ class _State:
                 "cooldown_s":   max(0.0, self._cooldown_until - time.monotonic()),
             }
 
-    # ------------------------------------------------------------------
-    # Concurrency gate (threading-based, so asyncio.sleep() can wait)
-    # ------------------------------------------------------------------
-
     def try_acquire_concurrency(self) -> bool:
         with self._lock:
             if self._inflight >= MAX_CONCURRENCY:
@@ -144,27 +116,12 @@ class _State:
         with self._lock:
             self._inflight = max(0, self._inflight - 1)
 
-
 _state = _State()
-
-
-# ---------------------------------------------------------------------------
-# Public async API
-# ---------------------------------------------------------------------------
 
 async def acquire(
     estimated_tokens: int,
-    deadline: float,          # absolute monotonic time
+    deadline: float,
 ) -> Tuple[bool, str]:
-    """
-    Waits (via asyncio.sleep) until capacity is available or deadline expires.
-
-    Returns:
-        (True,  "NORMAL"|"THROTTLED")   – slot reserved; call release_tokens()
-        (False, "DAILY_EXHAUSTED")      – unrecoverable today
-        (False, "RATE_LIMITED")         – deadline passed before slot opened
-    """
-    # Quick daily check (non-blocking)
     with _state._lock:
         _state._reset_daily_if_needed()
         if _state._daily_exhausted(estimated_tokens):
@@ -175,7 +132,6 @@ async def acquire(
         if now >= deadline:
             return False, "RATE_LIMITED"
 
-        # Respect 429 global cooldown
         cooldown_left = _state._cooldown_until - now
         if cooldown_left > 0:
             sleep_s = min(cooldown_left, deadline - now)
@@ -206,12 +162,7 @@ async def acquire(
             return False, "RATE_LIMITED"
         await asyncio.sleep(sleep_s)
 
-
 async def acquire_concurrency(deadline: float) -> bool:
-    """
-    Waits until a concurrency slot opens or deadline expires.
-    Uses polling + asyncio.sleep (no asyncio primitives stored globally).
-    """
     while True:
         if _state.try_acquire_concurrency():
             return True
@@ -220,32 +171,22 @@ async def acquire_concurrency(deadline: float) -> bool:
             return False
         await asyncio.sleep(min(0.05, remaining))
 
-
 def release_concurrency() -> None:
     _state.release_concurrency()
 
-
 def release_tokens(estimated: int, actual_in: int, actual_out: int) -> None:
     _state.adjust_actual_tokens(estimated, actual_in, actual_out)
-
 
 def set_cooldown(retry_after_seconds: float) -> None:
     _state._cooldown_until = time.monotonic() + retry_after_seconds
     log.warning("429 cooldown set for %.1fs", retry_after_seconds)
 
-
 def snapshot() -> dict:
     return _state.snapshot()
-
-
-# ---------------------------------------------------------------------------
-# Test helpers
-# ---------------------------------------------------------------------------
 
 def force_daily_exhausted() -> None:
     with _state._lock:
         _state._day_requests = RPD_LIMIT
-
 
 def reset_for_test() -> None:
     with _state._lock:
