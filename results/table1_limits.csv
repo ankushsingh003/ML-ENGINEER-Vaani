@@ -1,0 +1,8 @@
+limit,value_found,how_found,confidence
+Requests per minute (RPM),30,x-ratelimit-limit-requests header from probe,high
+Tokens per minute (TPM),6000,x-ratelimit-limit-tokens header from probe,high
+Requests per day (RPD),14400,Documentation; not directly measured,medium
+Tokens per day (TPD),500000,Documentation; not directly measured,medium
+Requests in flight at once,5,Concurrency cliff observed during probe saturation burst,medium
+Response when limit is hit,HTTP 429 with Retry-After header and rate_limit_error body,Captured in probe burst run,high
+Recovery time after 429,2.7s window reset,x-ratelimit-reset-requests header average over probe run,high
