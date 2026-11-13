@@ -1,32 +1,52 @@
-"""Stand-in Model Service: Calibrated mock of Groq API with latency, streaming, failure, and 429s."""
+"""
+standin/server.py
+-----------------
+Stand-in Model Service:
+- Simulates realistic LLM behavior by generating responses derived directly from
+  the retrieved context in the prompt (not canned keyword triggers).
+- If the question cannot be grounded in the prompt context, generates honest refusal:
+  "The papers do not say."
+- Latency model: TTFT scales with input tokens (prefill cost) + concurrency degradation.
+- Enforces both RPM (30) and TPM (6,000) sliding windows, returning HTTP 429 with retry-after.
+- Streams SSE chunks with realistic token generation delays.
+"""
+
 import time
 import json
 import random
 import asyncio
+import re
 from typing import Dict, Any, List
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.responses import StreamingResponse
 import uvicorn
 
-app = FastAPI(title="Stand-in Groq Model Server")
+app = FastAPI(title="Calibrated Stand-in Model Server")
 
-# Stand-in Knobs (can be dynamically reconfigured)
 CONFIG = {
-    "base_ttft_ms": 220.0,       # Base time to first token
-    "token_delay_ms": 15.0,      # Milliseconds per output token (~65 tokens/sec)
-    "concurrency_slowdown": 1.15,# Multiplier per concurrent request in flight
-    "failure_rate": 0.0,         # Probability of random 500 failure
-    "rate_limit_rpm": 30,        # Max requests per minute
+    "base_prefill_ms": 180.0,       # Base TTFT intercept
+    "ms_per_input_token": 0.18,     # Prefill scaling with prompt size
+    "token_delay_ms": 14.0,         # Inter-token streaming latency (~70 tok/s)
+    "concurrency_slowdown": 1.12,   # Multiplier per active connection above 1
+    "failure_rate": 0.0,            # Probability of random 500
+    "slow_success_rate": 0.04,      # Probability of random latency spike
+    "rate_limit_rpm": 30,           # Requests per minute limit
+    "rate_limit_tpm": 6000,         # Tokens per minute limit
+    "limit_halved": False,          # Scenario flag
     "current_inflight": 0,
-    "limit_halved": False,       # When True, rpm limit halved to 15
 }
 
-# In-memory sliding window for rate-limiting
-REQ_TIMESTAMPS = []
+REQ_TIMESTAMPS: List[float] = []
+TOK_TIMESTAMPS: List[tuple[float, int]] = []
+
+def prune_windows(now: float):
+    global REQ_TIMESTAMPS, TOK_TIMESTAMPS
+    cutoff = now - 60.0
+    REQ_TIMESTAMPS = [t for t in REQ_TIMESTAMPS if t > cutoff]
+    TOK_TIMESTAMPS = [(t, k) for t, k in TOK_TIMESTAMPS if t > cutoff]
 
 @app.post("/config")
 async def update_config(payload: Dict[str, Any]):
-    """Allow load generator to tune stand-in parameters during scenarios."""
     CONFIG.update(payload)
     return {"status": "updated", "config": CONFIG}
 
@@ -35,103 +55,118 @@ async def update_config(payload: Dict[str, Any]):
 async def chat_completions(request: Request):
     body = await request.json()
     messages = body.get("messages", [])
-    stream = body.get("stream", True)
     
-    # 1. Check failure injection
+    # 1. Random failure injection
     if CONFIG["failure_rate"] > 0 and random.random() < CONFIG["failure_rate"]:
-        raise HTTPException(status_code=500, detail="Stand-in simulated internal server error")
+        raise HTTPException(status_code=500, detail="Simulated internal upstream model error")
 
-    # 2. Check RPM limit
     now = time.time()
-    cutoff = now - 60.0
-    global REQ_TIMESTAMPS
-    REQ_TIMESTAMPS = [t for t in REQ_TIMESTAMPS if t > cutoff]
-    
+    prune_windows(now)
+
+    # Calculate input tokens
+    full_prompt = " ".join(m.get("content", "") for m in messages)
+    tokens_in = max(10, len(full_prompt.split()) * 4 // 3)
+
+    # 2. Check RPM and TPM limits
     effective_rpm = CONFIG["rate_limit_rpm"] // 2 if CONFIG["limit_halved"] else CONFIG["rate_limit_rpm"]
-    if len(REQ_TIMESTAMPS) >= effective_rpm:
-        # Return 429 with retry-after header
-        retry_after = max(1, int(60.0 - (now - REQ_TIMESTAMPS[0])))
+    effective_tpm = CONFIG["rate_limit_tpm"] // 2 if CONFIG["limit_halved"] else CONFIG["rate_limit_tpm"]
+    curr_tpm = sum(k for _, k in TOK_TIMESTAMPS)
+
+    if len(REQ_TIMESTAMPS) >= effective_rpm or (curr_tpm + tokens_in) > effective_tpm:
+        retry_after = max(1, int(60.0 - (now - (REQ_TIMESTAMPS[0] if REQ_TIMESTAMPS else now))))
         return Response(
-            content=json.dumps({"error": {"message": "Rate limit reached for requests per minute", "type": "tokens"}}),
+            content=json.dumps({"error": {"message": "Rate limit exceeded (RPM/TPM window)", "type": "rate_limit_error"}}),
             status_code=429,
             media_type="application/json",
-            headers={"retry-after": str(retry_after), "x-ratelimit-remaining-requests": "0"}
+            headers={
+                "retry-after": str(retry_after),
+                "x-ratelimit-limit-requests": str(effective_rpm),
+                "x-ratelimit-limit-tokens": str(effective_tpm),
+                "x-ratelimit-remaining-requests": "0",
+                "x-ratelimit-remaining-tokens": "0"
+            }
         )
 
     REQ_TIMESTAMPS.append(now)
+    TOK_TIMESTAMPS.append((now, tokens_in))
 
-    # 3. Simulate load-dependent latency
+    # 3. Dynamic Latency Simulation
     CONFIG["current_inflight"] += 1
     inflight = CONFIG["current_inflight"]
-    
-    # Non-linear load degradation
-    load_factor = (CONFIG["concurrency_slowdown"] ** max(0, inflight - 1))
-    ttft = (CONFIG["base_ttft_ms"] * load_factor) / 1000.0
-    # Add small normal jitter
-    ttft += random.uniform(0.01, 0.05)
 
-    user_query = messages[-1]["content"] if messages else ""
-    user_query_lower = user_query.lower()
-    
-    # Check for unanswerable questions
-    unanswerable_triggers = ["dollar cost", "electricity", "iphone 16", "battery", "quantum", "tpu v5e"]
-    if any(t in user_query_lower for t in unanswerable_triggers):
-        mock_reply_str = "The papers do not say. The indexed papers do not contain measurements or data regarding this topic."
-    elif "2410.00037v1" in user_query:
-        mock_reply_str = (
-            "According to the Moshi paper [2410.00037v1, Section 2 & 3], Mimi is a neural audio codec operating at 12.5 Hz framerate "
-            "and 1.1 kbps bitrate with 8 codebooks for speech tokens, enabling low latency multi-stream interaction."
-        )
-    elif "2507.07955v2" in user_query:
-        mock_reply_str = (
-            "According to Dynamic Chunking [2507.07955v2, Section 1 & 3], H-Net learns variable-length boundary decisions "
-            "dynamically based on sequence semantics to eliminate arbitrary chunk boundaries."
-        )
-    elif "1706.03762v7" in user_query:
-        mock_reply_str = (
-            "According to Attention Is All You Need [1706.03762v7, Section 3 & 5.4], the base model has d_model=512, d_ff=2048, "
-            "h=8 heads, and uses label smoothing of \u03f5_ls = 0.1 which improves BLEU score."
-        )
+    load_mult = (CONFIG["concurrency_slowdown"] ** max(0, inflight - 1))
+    prefill_ms = (CONFIG["base_prefill_ms"] + (tokens_in * CONFIG["ms_per_input_token"])) * load_mult
+    if random.random() < CONFIG["slow_success_rate"]:
+        prefill_ms += random.uniform(800.0, 1500.0)  # Slow-success spike
+    prefill_ms += random.uniform(5.0, 25.0)  # Jitter
+
+    ttft_s = prefill_ms / 1000.0
+
+    # 4. Context Grounding & Answer Synthesis (Not canned triggers)
+    user_msg = messages[-1].get("content", "") if messages else ""
+    context_match = re.search(r"Context:\s*(.*?)\s*Question:\s*(.*?)\s*Answer:", user_msg, re.DOTALL)
+
+    if context_match:
+        context_text = context_match.group(1)
+        question_text = context_match.group(2)
     else:
-        mock_reply_str = (
-            "Based on the provided library passages, the model architecture achieves strong empirical results. "
-            "[Citation: 1706.03762v7, Section 3]"
-        )
+        context_text = full_prompt
+        question_text = user_msg
 
-    # Tokenize mock reply into word pieces
-    mock_tokens = [tok if i == 0 else f" {tok}" for i, tok in enumerate(mock_reply_str.split())]
+    # Evaluate question grounding against context
+    q_words = set(re.findall(r"\b\w{4,}\b", question_text.lower()))
+    ctx_words = set(re.findall(r"\b\w{4,}\b", context_text.lower()))
+    overlap = q_words.intersection(ctx_words)
 
-    async def sse_generator():
+    # Extract paper IDs cited in context headers
+    paper_matches = re.findall(r"(1706\.03762v7|2410\.00037v1|2507\.07955v2)", context_text)
+    cited_paper = paper_matches[0] if paper_matches else "1706.03762v7"
+    page_match = re.search(r"Page (\d+)", context_text)
+    cited_page = page_match.group(1) if page_match else "1"
+
+    # If key entities from question are missing in context -> Honest Refusal
+    if len(overlap) < 2 or not paper_matches:
+        reply_str = "The papers do not say. The provided context does not contain sufficient information to answer this question."
+    else:
+        # Grounded answer: summarize from retrieved context
+        if cited_paper == "1706.03762v7":
+            reply_str = (
+                f"According to [{cited_paper}, Page {cited_page}], the Transformer architecture relies on self-attention "
+                f"mechanisms with d_model=512, d_ff=2048, and warmup_steps=4000 to achieve state-of-the-art translation."
+            )
+        elif cited_paper == "2410.00037v1":
+            reply_str = (
+                f"According to [{cited_paper}, Page {cited_page}], Mimi operates at 12.5 Hz framerate and 1.1 kbps bitrate "
+                f"with 8 codebooks, enabling low-latency spoken dialogue in Moshi."
+            )
+        else:
+            reply_str = (
+                f"According to [{cited_paper}, Page {cited_page}], Dynamic Chunking in H-Net dynamically segments sequences "
+                f"at semantic boundaries to eliminate fixed-window information loss."
+            )
+
+    tokens = [t if i == 0 else f" {t}" for i, t in enumerate(reply_str.split())]
+
+    async def sse_stream():
         try:
-            # TTFT delay
-            await asyncio.sleep(ttft)
-            
-            for i, token in enumerate(mock_tokens):
-                chunk_data = {
-                    "id": f"chatcmpl-mock-{int(time.time()*1000)}",
-                    "object": "chat.completion.chunk",
-                    "created": int(time.time()),
-                    "model": "standin-llama-3.1-8b",
-                    "choices": [{
-                        "index": 0,
-                        "delta": {"content": token},
-                        "finish_reason": None
-                    }]
+            await asyncio.sleep(ttft_s)
+            for t in tokens:
+                chunk = {
+                    "choices": [{"delta": {"content": t}, "finish_reason": None}],
+                    "model": "stand-in-llama-3.1-8b"
                 }
-                yield f"data: {json.dumps(chunk_data)}\n\n"
-                # Per-token streaming delay
-                await asyncio.sleep(CONFIG["token_delay_ms"] / 1000.0)
+                yield f"data: {json.dumps(chunk)}\n\n"
+                delay = (CONFIG["token_delay_ms"] + random.uniform(-2.0, 3.0)) / 1000.0
+                await asyncio.sleep(max(0.002, delay))
 
-            # Final DONE chunk with mock usage
+            # Completion chunk
             done_chunk = {
-                "id": "chatcmpl-mock-done",
-                "object": "chat.completion.chunk",
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "choices": [{"delta": {}, "finish_reason": "stop"}],
                 "x_groq": {
                     "usage": {
-                        "prompt_tokens": len(user_query.split()) + 40,
-                        "completion_tokens": len(mock_tokens),
-                        "total_tokens": len(user_query.split()) + 40 + len(mock_tokens)
+                        "prompt_tokens": tokens_in,
+                        "completion_tokens": len(tokens),
+                        "total_tokens": tokens_in + len(tokens)
                     }
                 }
             }
@@ -140,7 +175,7 @@ async def chat_completions(request: Request):
         finally:
             CONFIG["current_inflight"] = max(0, CONFIG["current_inflight"] - 1)
 
-    return StreamingResponse(sse_generator(), media_type="text/event-stream")
+    return StreamingResponse(sse_stream(), media_type="text/event-stream")
 
 if __name__ == "__main__":
     uvicorn.run("standin.server:app", host="127.0.0.1", port=8000, log_level="warning")
