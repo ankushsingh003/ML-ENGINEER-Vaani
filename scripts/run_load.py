@@ -153,6 +153,10 @@ async def run_scenario_daily_exhausted(source: str = "stand-in", count: int = 10
 async def run_retrieval_comparison(source: str = "stand-in"):
     print(f"\n>>> Running Retrieval Benchmark across 3 settings <<<")
     await configure_standin({"limit_halved": False, "failure_rate": 0.0})
+    # Allow any prior scenario's 60-second sliding window to clear before retrieval eval.
+    # This prevents overload/halved scenario 429 cooldowns from poisoning retrieval metrics.
+    print("Waiting 65s for rate-limit windows to clear before retrieval eval...")
+    await asyncio.sleep(65)
     questions = load_questions()
     for setting_key in ["setting_1", "setting_2", "setting_3"]:
         print(f"\n--- Testing {setting_key}: {RETRIEVAL_SETTINGS[setting_key]['description']} ---")
@@ -166,7 +170,10 @@ async def run_retrieval_comparison(source: str = "stand-in"):
                 retrieval_setting=setting_key
             )
             print(f"[{setting_key}] Q{i+1}: status={res.get('status')}, grade={rec.get('answer_grade')}, tokens_in={rec.get('tokens_in')}, TTFT={rec['ttft_ms']:.1f}ms")
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(2.2)  # ~27 req/min — safely below 30 RPM
+        # Let the sliding window settle before next setting
+        print(f"Waiting 65s to clear rate-limit windows before next retrieval setting...")
+        await asyncio.sleep(65)
 
 async def main():
     parser = argparse.ArgumentParser()
