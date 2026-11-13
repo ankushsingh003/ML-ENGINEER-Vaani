@@ -1,11 +1,7 @@
 """
 scripts/run_load.py
 -------------------
-Benchmark orchestrator executing required load shapes and retrieval evaluations:
-- Uses the real bounded queue with worker pool (relay.queue.admission_controller).
-- Instruments each request with RequestTrace (monotonic timestamps and breakdown).
-- Uses real factual grading (relay.grading.grade_answer).
-- Writes to results.csv and results/results_trace.jsonl.
+Benchmark orchestrator executing required load shapes and retrieval evaluations.
 """
 
 import sys
@@ -90,8 +86,6 @@ async def execute_request(
 
     return outcome, rec
 
-# --- Scenarios ---
-
 async def run_scenario_steady(source: str = "stand-in", count: int = 15):
     print(f"\n>>> Running Scenario: STEADY (n={count}, source={source}) <<<")
     await configure_standin({"limit_halved": False, "failure_rate": 0.0})
@@ -124,7 +118,7 @@ async def run_scenario_overload(source: str = "stand-in", count: int = 25):
     for i in range(count):
         q = questions[i % len(questions)]
         tasks.append(asyncio.create_task(execute_request(f"overload_{i+1}", "sustained_overload", source, q)))
-        await asyncio.sleep(0.8)  # Rapid arrival ~75 req/min
+        await asyncio.sleep(0.8)
     await asyncio.gather(*tasks)
 
 async def run_scenario_limit_halved(source: str = "stand-in", count: int = 15):
@@ -153,8 +147,6 @@ async def run_scenario_daily_exhausted(source: str = "stand-in", count: int = 10
 async def run_retrieval_comparison(source: str = "stand-in"):
     print(f"\n>>> Running Retrieval Benchmark across 3 settings <<<")
     await configure_standin({"limit_halved": False, "failure_rate": 0.0})
-    # Allow any prior scenario's 60-second sliding window to clear before retrieval eval.
-    # This prevents overload/halved scenario 429 cooldowns from poisoning retrieval metrics.
     print("Waiting 65s for rate-limit windows to clear before retrieval eval...")
     await asyncio.sleep(65)
     questions = load_questions()
@@ -170,8 +162,7 @@ async def run_retrieval_comparison(source: str = "stand-in"):
                 retrieval_setting=setting_key
             )
             print(f"[{setting_key}] Q{i+1}: status={res.get('status')}, grade={rec.get('answer_grade')}, tokens_in={rec.get('tokens_in')}, TTFT={rec['ttft_ms']:.1f}ms")
-            await asyncio.sleep(2.2)  # ~27 req/min — safely below 30 RPM
-        # Let the sliding window settle before next setting
+            await asyncio.sleep(2.2)
         print(f"Waiting 65s to clear rate-limit windows before next retrieval setting...")
         await asyncio.sleep(65)
 
