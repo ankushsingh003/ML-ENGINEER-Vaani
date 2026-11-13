@@ -2,7 +2,7 @@
 import os
 import urllib.request
 from pathlib import Path
-import fitz  # PyMuPDF
+import fitz
 
 PAPERS = [
     {
@@ -47,7 +47,6 @@ def download_and_extract():
         else:
             print(f"Found existing {pdf_path}")
             
-        # Extract text page by page with PyMuPDF
         doc = fitz.open(pdf_path)
         print(f"Extracting {len(doc)} pages from {paper['filename']}...")
         full_text = []
@@ -62,4 +61,3 @@ def download_and_extract():
 
 if __name__ == "__main__":
     download_and_extract()
-
