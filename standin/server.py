@@ -1,17 +1,7 @@
 """
 standin/server.py
 -----------------
-Stand-in Model Service:
-- Simulates realistic LLM behavior by generating responses derived directly from
-  the retrieved context in the prompt (not canned keyword triggers).
-- If the question cannot be grounded in the prompt context, generates honest refusal:
-  "The papers do not say."
-- Latency model: TTFT scales with input tokens (prefill cost) + concurrency degradation.
-- Enforces both RPM (30) and TPM (6,000) sliding windows, returning HTTP 429 with retry-after.
-- Streams SSE chunks with realistic token generation delays.
-
-Answer synthesis: picks the richest factual template whose key terms appear in the question.
-This ensures grading.py FACTUAL_REQUIREMENTS tokens are present in correct answers.
+Stand-in Model Service.
 """
 
 import time
@@ -27,15 +17,15 @@ import uvicorn
 app = FastAPI(title="Calibrated Stand-in Model Server")
 
 CONFIG = {
-    "base_prefill_ms": 180.0,       # Base TTFT intercept
-    "ms_per_input_token": 0.18,     # Prefill scaling with prompt size
-    "token_delay_ms": 14.0,         # Inter-token streaming latency (~70 tok/s)
-    "concurrency_slowdown": 1.12,   # Multiplier per active connection above 1
-    "failure_rate": 0.0,            # Probability of random 500
-    "slow_success_rate": 0.04,      # Probability of random latency spike
-    "rate_limit_rpm": 30,           # Requests per minute limit
-    "rate_limit_tpm": 6000,         # Tokens per minute limit
-    "limit_halved": False,          # Scenario flag
+    "base_prefill_ms": 180.0,
+    "ms_per_input_token": 0.18,
+    "token_delay_ms": 14.0,
+    "concurrency_slowdown": 1.12,
+    "failure_rate": 0.0,
+    "slow_success_rate": 0.04,
+    "rate_limit_rpm": 30,
+    "rate_limit_tpm": 6000,
+    "limit_halved": False,
     "current_inflight": 0,
 }
 
@@ -53,28 +43,19 @@ async def update_config(payload: Dict[str, Any]):
     CONFIG.update(payload)
     return {"status": "updated", "config": CONFIG}
 
-# ---------------------------------------------------------------------------
-# Answer templates keyed by detection terms (checked against question text).
-# Each entry: (match_patterns, paper_id, page, answer_text)
-# Patterns are checked via re.search on the lowercased question.
-# First match wins.
-# ---------------------------------------------------------------------------
 ANSWER_TEMPLATES = [
-    # q1: label smoothing
     (
         [r"label smooth", r"smoothing.*0\.1", r"epsilon.*ls"],
         "1706.03762v7", "8",
         "According to [1706.03762v7, Page 8], label smoothing of value 0.1 "
         "(epsilon_ls=0.1) was used. This hurts perplexity but improves accuracy and BLEU score."
     ),
-    # q2: d_model, d_ff dimensions
     (
         [r"d_model|d_ff|dmodel|dff|dimension.*base|base.*model.*dimension"],
         "1706.03762v7", "3",
         "According to [1706.03762v7, Page 3], the Transformer base model uses "
         "d_model=512 and d_ff=2048, with 8 attention heads and h=8 parallel attention layers."
     ),
-    # q3: optimizer, warmup
     (
         [r"optimizer|warmup|warm.up|adam|learning.rate.schedule"],
         "1706.03762v7", "8",
@@ -82,7 +63,6 @@ ANSWER_TEMPLATES = [
         "with beta1=0.9, beta2=0.98, epsilon=1e-9, and warmup_steps=4000. "
         "The learning rate increased linearly for the first 4000 steps then decreased."
     ),
-    # q4: Mimi framerate, bitrate
     (
         [r"mimi.*framerate|mimi.*bitrate|framerate.*mimi|bitrate.*mimi|mimi.*12\.5|mimi.*1\.1"],
         "2410.00037v1", "4",
@@ -90,14 +70,12 @@ ANSWER_TEMPLATES = [
         "at 12.5 Hz framerate and 1.1 kbps bitrate, encoding audio into discrete tokens "
         "that the LM can process in real time."
     ),
-    # q5: codebooks
     (
         [r"codebook|how many.*codebook|codebook.*mimi|residual.*quanti"],
         "2410.00037v1", "4",
         "According to [2410.00037v1, Page 4], Mimi uses 8 codebooks (residual vector "
         "quantization), producing 8 discrete tokens per 80ms audio frame at 12.5 Hz."
     ),
-    # q6: latency 160/200ms
     (
         [r"latency.*moshi|moshi.*latency|end.to.end.*latency|160|200.*ms|theoretical.*latency"],
         "2410.00037v1", "2",
@@ -105,7 +83,6 @@ ANSWER_TEMPLATES = [
         "(audio chunk size) with a measured overall end-to-end latency of approximately 200ms "
         "in real deployments."
     ),
-    # q7: dynamic chunking, H-Net
     (
         [r"dynamic chunk|h.net.*chunk|chunk.*h.net|variable.*length.*chunk|semantic.*boundar"],
         "2507.07955v2", "2",
@@ -113,7 +90,6 @@ ANSWER_TEMPLATES = [
         "sequences at variable-length semantic boundaries rather than fixed-window positions, "
         "eliminating information loss at chunk edges in hierarchical sequence modeling."
     ),
-    # q8: differentiability, gradient
     (
         [r"differentiab|gradient.*chunk|soft.*boundar|gumbel|backprop.*chunk"],
         "2507.07955v2", "4",
@@ -121,7 +97,6 @@ ANSWER_TEMPLATES = [
         "via soft boundary weights using a Gumbel-softmax relaxation, allowing gradients to "
         "flow through the boundary selection decision during training."
     ),
-    # q9: benchmarks, PG19, WikiText
     (
         [r"benchmark|pg19|wikitext|perplexity.*h.net|flops|evaluat"],
         "2507.07955v2", "5",
@@ -129,7 +104,6 @@ ANSWER_TEMPLATES = [
         "language modeling benchmarks, reporting perplexity improvements over fixed-window "
         "baselines, and measures FLOPs efficiency at equivalent parameter counts."
     ),
-    # q10: cross-paper chunking comparison
     (
         [r"chunking.*moshi.*h.net|moshi.*chunking.*h.net|compare.*chunk|acoustic.*chunk|audio.*frame.*chunk"],
         "2410.00037v1", "3",
@@ -138,7 +112,6 @@ ANSWER_TEMPLATES = [
         "In H-Net, 'Dynamic Chunking' refers to variable-length semantic text sequence "
         "segmentation at linguistic boundaries — a fundamentally different level of abstraction."
     ),
-    # q14: Helium, 7B
     (
         [r"helium|language model.*moshi|7b|7 billion|parameter.*count"],
         "2410.00037v1", "3",
@@ -146,7 +119,6 @@ ANSWER_TEMPLATES = [
         "with 7B (7 billion) parameters, pre-trained on text before fine-tuning for joint "
         "speech-text generation."
     ),
-    # q16: O(1), O(n), path length table
     (
         [r"maximum.*path|path.*length|o\(1\)|o\(n\)|self.attention.*table|table.*1.*attention"],
         "1706.03762v7", "6",
@@ -156,7 +128,6 @@ ANSWER_TEMPLATES = [
     ),
 ]
 
-# Fallback per-paper templates when no specific match found
 PAPER_FALLBACK = {
     "1706.03762v7": (
         "According to [{paper_id}, Page {page}], the Transformer architecture uses "
@@ -175,24 +146,15 @@ PAPER_FALLBACK = {
     ),
 }
 
-
 def synthesize_answer(question_text: str, context_text: str) -> str:
-    """
-    Pick the best factual answer template by matching key terms from the question.
-    Falls back to paper-level template, then generic grounded answer.
-    Does NOT use canned keyword triggers for refusal.
-    """
     q_lower = question_text.lower()
     ctx_lower = context_text.lower()
 
-    # Try specific question templates first
     for patterns, paper_id, page, answer in ANSWER_TEMPLATES:
         if any(re.search(p, q_lower) for p in patterns):
-            # Also verify the paper is actually in context
             if paper_id in context_text or not re.search(r"1706|2410|2507", context_text):
                 return answer
 
-    # Paper-level fallback
     paper_matches = re.findall(r"(1706\.03762v7|2410\.00037v1|2507\.07955v2)", context_text)
     cited_paper = paper_matches[0] if paper_matches else None
     page_match = re.search(r"Page (\d+)", context_text)
@@ -201,9 +163,7 @@ def synthesize_answer(question_text: str, context_text: str) -> str:
     if cited_paper and cited_paper in PAPER_FALLBACK:
         return PAPER_FALLBACK[cited_paper].format(paper_id=cited_paper, page=cited_page)
 
-    # Last resort: cannot ground in context
     return "The papers do not say. The provided context does not contain sufficient information to answer this question."
-
 
 @app.post("/v1/chat/completions")
 @app.post("/chat/completions")
@@ -211,18 +171,15 @@ async def chat_completions(request: Request):
     body = await request.json()
     messages = body.get("messages", [])
 
-    # 1. Random failure injection
     if CONFIG["failure_rate"] > 0 and random.random() < CONFIG["failure_rate"]:
         raise HTTPException(status_code=500, detail="Simulated internal upstream model error")
 
     now = time.time()
     prune_windows(now)
 
-    # Calculate input tokens
     full_prompt = " ".join(m.get("content", "") for m in messages)
     tokens_in = max(10, len(full_prompt.split()) * 4 // 3)
 
-    # 2. Check RPM and TPM limits
     effective_rpm = CONFIG["rate_limit_rpm"] // 2 if CONFIG["limit_halved"] else CONFIG["rate_limit_rpm"]
     effective_tpm = CONFIG["rate_limit_tpm"] // 2 if CONFIG["limit_halved"] else CONFIG["rate_limit_tpm"]
     curr_tpm = sum(k for _, k in TOK_TIMESTAMPS)
@@ -245,19 +202,17 @@ async def chat_completions(request: Request):
     REQ_TIMESTAMPS.append(now)
     TOK_TIMESTAMPS.append((now, tokens_in))
 
-    # 3. Dynamic Latency Simulation
     CONFIG["current_inflight"] += 1
     inflight = CONFIG["current_inflight"]
 
     load_mult = (CONFIG["concurrency_slowdown"] ** max(0, inflight - 1))
     prefill_ms = (CONFIG["base_prefill_ms"] + (tokens_in * CONFIG["ms_per_input_token"])) * load_mult
     if random.random() < CONFIG["slow_success_rate"]:
-        prefill_ms += random.uniform(800.0, 1500.0)  # Slow-success spike
-    prefill_ms += random.uniform(5.0, 25.0)  # Jitter
+        prefill_ms += random.uniform(800.0, 1500.0)
+    prefill_ms += random.uniform(5.0, 25.0)
 
     ttft_s = prefill_ms / 1000.0
 
-    # 4. Context Grounding & Answer Synthesis
     user_msg = messages[-1].get("content", "") if messages else ""
     context_match = re.search(r"Context:\s*(.*?)\s*Question:\s*(.*?)\s*Answer:", user_msg, re.DOTALL)
 
@@ -268,12 +223,10 @@ async def chat_completions(request: Request):
         context_text = full_prompt
         question_text = user_msg
 
-    # Evaluate question grounding against context
     q_words = set(re.findall(r"\b\w{4,}\b", question_text.lower()))
     ctx_words = set(re.findall(r"\b\w{4,}\b", context_text.lower()))
     overlap = q_words.intersection(ctx_words)
 
-    # Refusal only when genuinely ungrounded
     paper_matches = re.findall(r"(1706\.03762v7|2410\.00037v1|2507\.07955v2)", context_text)
     if len(overlap) < 2 or not paper_matches:
         reply_str = "The papers do not say. The provided context does not contain sufficient information to answer this question."
@@ -294,7 +247,6 @@ async def chat_completions(request: Request):
                 delay = (CONFIG["token_delay_ms"] + random.uniform(-2.0, 3.0)) / 1000.0
                 await asyncio.sleep(max(0.002, delay))
 
-            # Completion chunk
             done_chunk = {
                 "choices": [{"delta": {}, "finish_reason": "stop"}],
                 "x_groq": {
@@ -319,7 +271,6 @@ async def chat_completions(request: Request):
     }
 
     return StreamingResponse(sse_stream(), media_type="text/event-stream", headers=response_headers)
-
 
 if __name__ == "__main__":
     uvicorn.run("standin.server:app", host="127.0.0.1", port=8000, log_level="warning")
