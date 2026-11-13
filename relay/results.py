@@ -9,22 +9,21 @@ RESULTS_FILE = Path("results.csv")
 FIELDNAMES = [
     "request_id",
     "scenario",
-    "source",            # 'real' | 'stand-in'
-    "start_time",        # ISO timestamp or seconds float
-    "first_token_ms",    # float / int ms
-    "total_ms",          # float / int ms
-    "status",            # 'ok' | 'rate_limited' | 'timeout' | 'error'
-    "retries",           # int count
-    "tokens_in",         # int count
-    "tokens_out",        # int count
-    "retrieval_setting", # e.g. 'setting_1', 'setting_2', 'setting_3'
-    "answer_grade"       # 'correct' | 'wrong' | 'refused_correctly' | 'refused_wrongly'
+    "source",
+    "start_time",
+    "first_token_ms",
+    "total_ms",
+    "status",
+    "retries",
+    "tokens_in",
+    "tokens_out",
+    "retrieval_setting",
+    "answer_grade"
 ]
 
 _lock = threading.Lock()
 
 def init_results_csv(overwrite: bool = False):
-    """Initializes the CSV with headers if it does not exist or if overwrite is requested."""
     with _lock:
         if overwrite or not RESULTS_FILE.exists():
             with open(RESULTS_FILE, "w", newline="", encoding="utf-8") as f:
@@ -45,7 +44,6 @@ def log_result(
     retrieval_setting: str,
     answer_grade: Literal["correct", "wrong", "refused_correctly", "refused_wrongly"]
 ):
-    """Thread-safe append of a single request outcome to results.csv."""
     with _lock:
         if not RESULTS_FILE.exists():
             init_results_csv()
@@ -66,4 +64,3 @@ def log_result(
                 "retrieval_setting": retrieval_setting,
                 "answer_grade": answer_grade
             })
-
