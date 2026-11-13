@@ -1,12 +1,8 @@
 """
 relay/queue.py
 --------------
-True FIFO admission queue with:
-- Bounded capacity (maxsize=MAX_QUEUE_SIZE). Requests exceeding capacity are shed immediately.
-- Real async worker pool (N=MAX_CONCURRENCY workers) consuming items.
-- Deadline enforcement at dequeue: requests that waited in queue longer than the deadline
-  are dropped as timed_out without executing pipeline steps or burning token quota.
-- Dynamic peak queue length tracking.
+True FIFO admission queue with bounded capacity, worker pool, deadline enforcement,
+and dynamic peak queue tracking.
 """
 
 import asyncio
@@ -64,7 +60,6 @@ class AdmissionController:
             now = time.monotonic()
             wait_time = now - item.t_enqueued
 
-            # Check if deadline expired while waiting in the queue
             if wait_time >= item.deadline_sec:
                 self.total_timed_out += 1
                 rec = item.trace.timed_out(retrieval_setting="n/a")
@@ -83,10 +78,8 @@ class AdmissionController:
                 self.queue.task_done()
                 continue
 
-            # Mark dequeued timestamp in trace
             item.trace.mark_dequeued()
 
-            # Execute pipeline under remaining deadline
             remaining_deadline = item.deadline_sec - wait_time
             try:
                 res = await asyncio.wait_for(item.task_fn(), timeout=remaining_deadline)
@@ -120,17 +113,12 @@ class AdmissionController:
         trace: RequestTrace,
         deadline_sec: float = REQUEST_TIMEOUT_SEC
     ) -> Any:
-        """
-        Enqueues a task. If queue is full, immediately sheds the load.
-        Otherwise waits for a worker to execute the task and returns the result.
-        """
         self._ensure_started()
         trace.mark_enqueued()
 
         current_qsize = self.queue.qsize()
         trace.queue_len_at_enqueue = current_qsize
 
-        # 1. Admission Control: Check if queue is full
         if current_qsize >= self.max_queue_size:
             self.total_shed += 1
             rec = trace.shed()
@@ -145,7 +133,6 @@ class AdmissionController:
                 "answer_grade": "wrong"
             }
 
-        # Track peak queue length
         new_qsize = current_qsize + 1
         if new_qsize > self.peak_queue_length:
             self.peak_queue_length = new_qsize
@@ -167,5 +154,4 @@ class AdmissionController:
             await asyncio.gather(*self.workers, return_exceptions=True)
         self.workers.clear()
 
-# Global admission controller instance
 admission_controller = AdmissionController()
